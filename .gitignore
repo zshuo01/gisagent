@@ -1,0 +1,22 @@
+# Python 字节码文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境 (根据你的 agentv1 命名，也可以直接加上)
+agentv1/
+.venv/
+env/
+venv/
+
+# 编译/分发文件
+dist/
+build/
+*.egg-info/
+
+# 本地环境配置文件
+.env
+
+# GIS 相关缓存（如 QGIS 或 ArcGIS 产生的临时文件）
+*.log
+*.tmp
