@@ -1,4 +1,5 @@
 import os
+import random
 from pathlib import Path
 
 import streamlit as st
@@ -9,6 +10,11 @@ from core.router import TaskRouter
 from core.solver import GeoSolver
 from core.shield import GeoShieldSystem
 from core.dataset import load_dataset, format_mcq_prompt
+from core.interference import (
+    InterferenceMode,
+    build_guidance_prompt,
+    load_roles_config,
+)
 
 
 load_dotenv()
@@ -29,6 +35,24 @@ def _read_path_bytes(path: str | None) -> bytes | None:
     return file_path.read_bytes()
 
 
+def _new_seed() -> int:
+    return random.SystemRandom().randint(0, 2_147_483_647)
+
+
+def _sync_interference_seed(mode_key: str, majority_size: int, reroll: bool) -> int:
+    if "interference_seed" not in st.session_state:
+        st.session_state["interference_seed"] = _new_seed()
+
+    last_mode = st.session_state.get("interference_mode_key")
+    last_majority = st.session_state.get("interference_majority_size")
+    if reroll or last_mode != mode_key or last_majority != majority_size:
+        st.session_state["interference_seed"] = _new_seed()
+
+    st.session_state["interference_mode_key"] = mode_key
+    st.session_state["interference_majority_size"] = majority_size
+    return int(st.session_state["interference_seed"])
+
+
 def main() -> None:
     st.title("抗干扰地理空间智能协作系统 MVP")
 
@@ -45,25 +69,118 @@ def main() -> None:
 
     preset_text = ""
     preset_image_bytes = None
+    selected_sample = None
 
     if use_dataset:
         samples = load_dataset(data_dir)
         sample_options = [s.sample_id for s in samples]
         if sample_options:
             selected = st.sidebar.selectbox("选择题目", sample_options)
-            sample = next(s for s in samples if s.sample_id == selected)
-            preset_text = format_mcq_prompt(sample)
-            preset_image_bytes = _read_path_bytes(sample.image_path)
-            st.sidebar.write(f"Gold: {sample.answer} | Tag: {sample.tag}")
+            selected_sample = next(s for s in samples if s.sample_id == selected)
+            preset_text = format_mcq_prompt(selected_sample)
+            preset_image_bytes = _read_path_bytes(selected_sample.image_path)
+            st.sidebar.write(f"Gold: {selected_sample.answer} | Tag: {selected_sample.tag}")
         else:
             st.sidebar.warning("data目录下未找到样本")
+
+    st.sidebar.header("社会语境干扰")
+    mode_label_to_key = {
+        "NONE": InterferenceMode.NONE.value,
+        "Correct Guidance": InterferenceMode.CORRECT_GUIDANCE.value,
+        "Wrong Guidance": InterferenceMode.WRONG_GUIDANCE.value,
+    }
+    selected_mode_label = st.sidebar.selectbox(
+        "干扰方式",
+        options=list(mode_label_to_key.keys()),
+        index=0,
+    )
+    selected_mode = InterferenceMode(mode_label_to_key[selected_mode_label])
+
+    slider_label = "主阵营人数 / 6"
+    if selected_mode == InterferenceMode.CORRECT_GUIDANCE:
+        slider_label = "正确派人数 / 6"
+    elif selected_mode == InterferenceMode.WRONG_GUIDANCE:
+        slider_label = "错误派人数 / 6"
+
+    majority_size = st.sidebar.slider(
+        slider_label,
+        min_value=0,
+        max_value=6,
+        value=4,
+        disabled=(selected_mode == InterferenceMode.NONE),
+    )
+    if selected_mode == InterferenceMode.CORRECT_GUIDANCE:
+        st.sidebar.caption(f"错误派人数 = {6 - majority_size}")
+    elif selected_mode == InterferenceMode.WRONG_GUIDANCE:
+        st.sidebar.caption(f"正确派人数 = {6 - majority_size}")
+
+    reroll_clicked = st.sidebar.button("重新随机生成句式")
+    seed = _sync_interference_seed(
+        mode_key=selected_mode.value,
+        majority_size=majority_size,
+        reroll=reroll_clicked,
+    )
+    st.sidebar.caption(f"Interference seed: {seed}")
 
     text_input = st.text_area("输入文本", value=preset_text, height=200)
     uploaded = st.file_uploader("可选上传图像", type=["png", "jpg", "jpeg"])
     image_bytes = _read_image_bytes(uploaded) or preset_image_bytes
 
+    effective_mode = selected_mode
+    guidance_result = None
+    final_prompt = text_input
+    interference_summary = {
+        "mode": effective_mode.value,
+        "majority_size": 0,
+        "minority_size": 0,
+        "majority_choice": "N/A",
+        "minority_choice": "N/A",
+        "majority_roles": [],
+    }
+
+    if selected_mode != InterferenceMode.NONE:
+        can_apply = bool(use_dataset and selected_sample and selected_sample.answer)
+        if not can_apply:
+            st.warning("手动输入模式缺少标准答案，Correct/Wrong Guidance 已禁用并回退到 NONE。")
+            effective_mode = InterferenceMode.NONE
+        else:
+            try:
+                roles = load_roles_config(Path("data") / "guidance_roles.json")
+                rng = random.Random(seed)
+                guidance_result = build_guidance_prompt(
+                    base_prompt=text_input,
+                    mode=selected_mode,
+                    majority_size=majority_size,
+                    roles=roles,
+                    correct_choice_letter=selected_sample.answer,
+                    options=selected_sample.options,
+                    rng=rng,
+                )
+                final_prompt = guidance_result.full_prompt
+                interference_summary = {
+                    "mode": guidance_result.mode.value,
+                    "majority_size": guidance_result.majority_size,
+                    "minority_size": 6 - guidance_result.majority_size,
+                    "majority_choice": guidance_result.majority_choice_text,
+                    "minority_choice": guidance_result.minority_choice_text,
+                    "majority_roles": guidance_result.majority_roles,
+                }
+            except Exception as exc:
+                st.warning(f"干扰生成失败，已回退到 NONE：{exc}")
+                effective_mode = InterferenceMode.NONE
+
+    if effective_mode == InterferenceMode.NONE and guidance_result is None:
+        final_prompt = text_input
+        interference_summary["mode"] = InterferenceMode.NONE.value
+
+    st.subheader("Final Prompt")
+    st.code(final_prompt, language="text")
+    st.subheader("Interference Summary")
+    st.json(interference_summary)
+
     if st.button("Run"):
-        query = normalize_input(text_input, image_bytes)
+        run_text = text_input if effective_mode == InterferenceMode.NONE else final_prompt
+        query = normalize_input(run_text, image_bytes)
         result = system.run(query)
 
         route = result["route"]
