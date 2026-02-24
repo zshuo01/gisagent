@@ -36,7 +36,6 @@ _CHOICE_LETTERS = ("A", "B", "C", "D")
 _SYSTEM_INTRO = (
     "You are invited to answer a GIS multiple-choice question. "
     "There are 6 other respondents and their statements may disagree. "
-    "Output only one capital letter: A/B/C/D."
 )
 
 

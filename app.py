@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from core.mm_processor import normalize_input
 from core.router import TaskRouter
-from core.solver import GeoSolver
+from core.solver import GeoSolver, TargetModelConfig
 from core.shield import GeoShieldSystem
 from core.dataset import load_dataset, format_mcq_prompt
 from core.interference import (
@@ -60,8 +60,6 @@ def main() -> None:
     vision_model = os.getenv("VISION_MODEL", model_name)
 
     router = TaskRouter(model_name=model_name)
-    solver = GeoSolver(model_name=model_name, vision_model=vision_model)
-    system = GeoShieldSystem(router=router, solver=solver)
 
     st.sidebar.header("数据集加载")
     data_dir = st.sidebar.text_input("data目录", value="data")
@@ -82,6 +80,48 @@ def main() -> None:
             st.sidebar.write(f"Gold: {selected_sample.answer} | Tag: {selected_sample.tag}")
         else:
             st.sidebar.warning("data目录下未找到样本")
+
+    st.sidebar.header("被测试模型配置")
+    enable_target_config = st.sidebar.checkbox(
+        "启用前端Target配置",
+        value=bool(st.session_state.get("enable_target_config", False)),
+    )
+    st.session_state["enable_target_config"] = enable_target_config
+    target_api_key = st.sidebar.text_input(
+        "Target API Key",
+        value=st.session_state.get("target_api_key", ""),
+        type="password",
+        disabled=not enable_target_config,
+    )
+    target_base_url = st.sidebar.text_input(
+        "Target Base URL",
+        value=st.session_state.get("target_base_url", ""),
+        disabled=not enable_target_config,
+    )
+    target_model_name = st.sidebar.text_input(
+        "Target Model Name",
+        value=st.session_state.get("target_model_name", ""),
+        disabled=not enable_target_config,
+    )
+    st.session_state["target_api_key"] = target_api_key
+    st.session_state["target_base_url"] = target_base_url
+    st.session_state["target_model_name"] = target_model_name
+
+    enable_shield_recheck_default = str(os.getenv("ENABLE_SHIELD_RECHECK", "0")).lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    enable_shield_recheck = st.sidebar.checkbox(
+        "启用Shield二次复核(开启后使用Persona→Recheck)",
+        value=bool(st.session_state.get("enable_shield_recheck", enable_shield_recheck_default)),
+    )
+    st.session_state["enable_shield_recheck"] = enable_shield_recheck
+    show_shield_intermediate = st.sidebar.checkbox(
+        "Show Shield Intermediate",
+        value=bool(st.session_state.get("show_shield_intermediate", False)),
+    )
+    st.session_state["show_shield_intermediate"] = show_shield_intermediate
 
     st.sidebar.header("社会语境干扰")
     mode_label_to_key = {
@@ -181,7 +221,26 @@ def main() -> None:
     if st.button("Run"):
         run_text = text_input if effective_mode == InterferenceMode.NONE else final_prompt
         query = normalize_input(run_text, image_bytes)
-        result = system.run(query)
+
+        target_config = None
+        if enable_target_config:
+            if target_api_key.strip() and target_base_url.strip() and target_model_name.strip():
+                target_config = TargetModelConfig(
+                    api_key=target_api_key.strip(),
+                    base_url=target_base_url.strip(),
+                    model_name=target_model_name.strip(),
+                )
+            else:
+                st.warning("Target配置未填写完整，已回退为默认回答模型配置。")
+
+        run_solver = GeoSolver(
+            model_name=model_name,
+            vision_model=vision_model,
+            target_config=target_config,
+            enable_recheck=enable_shield_recheck,
+        )
+        run_system = GeoShieldSystem(router=router, solver=run_solver)
+        result = run_system.run(query)
 
         route = result["route"]
         st.subheader("路由输出")
@@ -198,8 +257,22 @@ def main() -> None:
             else:
                 st.write("(LOW risk: using baseline)")
 
+        if show_shield_intermediate:
+            with st.expander("Shield Intermediate", expanded=False):
+                if result["defended"]:
+                    trace = getattr(run_solver, "last_defended_trace", {})
+                    st.json(
+                        {
+                            "persona_answer": trace.get("persona_answer"),
+                            "final_answer": trace.get("final_answer"),
+                            "recheck_enabled": trace.get("recheck_enabled"),
+                        }
+                    )
+                else:
+                    st.write("No shield intermediate because risk is LOW.")
+
         if image_bytes:
-            st.image(image_bytes, caption="Input Image", use_column_width=True)
+            st.image(image_bytes, caption="Input Image", width=700)
 
 
 if __name__ == "__main__":

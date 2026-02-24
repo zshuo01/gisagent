@@ -9,12 +9,18 @@ from core.router import TaskRouter
 from core.solver import GeoSolver
 
 
-CHOICE_RE = re.compile(r"[ABCD]")
+ANSWER_LINE_RE = re.compile(r"(?im)^\s*answer\s*[:\uFF1A]\s*([A-E])\b")
+CHOICE_RE = re.compile(r"\b([A-E])\b")
 
 
 def _extract_choice(text: str) -> str:
-    match = CHOICE_RE.search(text or "")
-    return match.group(0) if match else ""
+    raw = text or ""
+    answer_line_match = ANSWER_LINE_RE.search(raw)
+    if answer_line_match:
+        return answer_line_match.group(1).upper()
+
+    match = CHOICE_RE.search(raw.upper())
+    return match.group(1).upper() if match else ""
 
 
 def main() -> None:
